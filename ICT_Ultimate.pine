@@ -1,0 +1,366 @@
+//@version=6
+indicator("ICT Ultimate (Soup+FVG+OB+MSS+OTE+KZ)", 
+          overlay=true, 
+          max_labels_count=500,
+          max_lines_count=500,
+          max_boxes_count=500,
+          max_bars_back=250)
+// CATATAN OPTIMASI: max_linefills_count dihapus (bukan argumen valid untuk indicator()).
+// max_bars_back=250 ditambahkan karena script memakai offset dinamis high[i]/low[i]/close[i]
+// di dalam loop (i berasal dari variabel, bukan angka konstan). Pine TIDAK bisa auto-detect
+// kebutuhan history untuk offset dinamis seperti ini, jadi tanpa max_bars_back eksplisit,
+// data lama bisa terbaca "na" secara diam-diam saat fvgLookback/obLookback diset besar (>200).
+
+// ============================================================
+// 1. PENGATURAN DASHBOARD (POSISI & FONT)
+// ============================================================
+showDashboard = input.bool(true, "▶ Tampilkan Dashboard", group="Dashboard")
+dashFontSize = input.string("Small", "Ukuran Font Dashboard", options=["Tiny", "Small", "Normal", "Large", "Huge"], group="Dashboard")
+dashPosition = input.string("Top Right", "Posisi Dashboard", options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group="Dashboard")
+
+// ============================================================
+// 2. PENGATURAN TURTLE SOUP
+// ============================================================
+showSoup = input.bool(true, "▶ Aktifkan Turtle Soup", group="1. Turtle Soup")
+showSoupLabel = input.bool(true, "Tampilkan Label Sinyal", group="1. Turtle Soup")
+lookback = input.int(5, "Swing Lookback", minval=2, maxval=20, group="1. Turtle Soup")
+labelSize = input.string("Normal", "Ukuran Label Sinyal", options=["Tiny", "Small", "Normal", "Large", "Huge"], group="1. Turtle Soup")
+showSwingLevels = input.bool(true, "Tampilkan Garis Swing", group="1. Turtle Soup")
+colorBullish = input.color(color.new(color.green, 0), "Warna Bullish", group="1. Turtle Soup", inline="c1")
+colorBearish = input.color(color.new(color.red, 0), "Warna Bearish", group="1. Turtle Soup", inline="c1")
+colorSwingHigh = input.color(color.new(color.orange, 70), "Warna Swing High", group="1. Turtle Soup", inline="c2")
+colorSwingLow = input.color(color.new(color.blue, 70), "Warna Swing Low", group="1. Turtle Soup", inline="c2")
+
+// ============================================================
+// 3. PENGATURAN FVG
+// ============================================================
+showFVG = input.bool(true, "▶ Aktifkan FVG", group="2. Fair Value Gap")
+fvgLookback = input.int(50, "Lookback (candle)", minval=10, maxval=200, group="2. Fair Value Gap")
+showUnmitigatedOnly = input.bool(true, "Hanya Unmitigated (belum tersentuh)", group="2. Fair Value Gap")
+fvgBullishColor = input.color(color.new(color.green, 70), "Warna Bullish", group="2. Fair Value Gap", inline="f1")
+fvgBearishColor = input.color(color.new(color.red, 70), "Warna Bearish", group="2. Fair Value Gap", inline="f1")
+fvgBorderColor = input.color(color.new(color.white, 80), "Border", group="2. Fair Value Gap")
+
+// ============================================================
+// 4. PENGATURAN ORDER BLOCK
+// ============================================================
+showOB = input.bool(true, "▶ Aktifkan Order Block", group="3. Order Block")
+obLookback = input.int(50, "Lookback (candle)", minval=10, maxval=200, group="3. Order Block")
+obUnmitigatedOnly = input.bool(true, "Hanya Unmitigated", group="3. Order Block")
+obBullishColor = input.color(color.new(color.blue, 65), "Warna Demand (Bullish)", group="3. Order Block", inline="o1")
+obBearishColor = input.color(color.new(color.orange, 65), "Warna Supply (Bearish)", group="3. Order Block", inline="o1")
+obBorderColor = input.color(color.new(color.white, 90), "Border", group="3. Order Block")
+
+// ============================================================
+// 5. PENGATURAN MSS (MARKET STRUCTURE SHIFT)
+// ============================================================
+showMSS = input.bool(true, "▶ Aktifkan MSS", group="4. Market Structure Shift")
+mssLookback = input.int(10, "Lookback Swing", minval=5, maxval=30, group="4. Market Structure Shift")
+showMSSLabel = input.bool(true, "Tampilkan Label MSS", group="4. Market Structure Shift")
+mssBullColor = input.color(color.new(color.lime, 0), "Warna MSS Bullish", group="4. Market Structure Shift", inline="m1")
+mssBearColor = input.color(color.new(color.fuchsia, 0), "Warna MSS Bearish", group="4. Market Structure Shift", inline="m1")
+
+// ============================================================
+// 6. PENGATURAN OTE (OPTIMAL TRADE ENTRY)
+// ============================================================
+showOTE = input.bool(true, "▶ Aktifkan OTE", group="5. Optimal Trade Entry")
+oteLevel62 = input.float(0.62, "Level 62%", minval=0.5, maxval=0.7, step=0.01, group="5. Optimal Trade Entry")
+oteLevel79 = input.float(0.79, "Level 79%", minval=0.7, maxval=0.9, step=0.01, group="5. Optimal Trade Entry")
+oteColor = input.color(color.new(color.yellow, 70), "Warna Zona OTE", group="5. Optimal Trade Entry")
+
+// ============================================================
+// 7. PENGATURAN KILLZONE (SESI)
+// ============================================================
+showKillzone = input.bool(true, "▶ Aktifkan Killzone", group="6. Killzone (Sesi)")
+killzoneSession = input.string("All Killzones", "Pilih Sesi", 
+                              options=["Asia (00-06 UTC)", "London (08-12 UTC)", "NY (13-16 UTC)", "All Killzones"], 
+                              group="6. Killzone (Sesi)")
+killzoneColor = input.color(color.new(color.purple, 85), "Warna Background Sesi", group="6. Killzone (Sesi)")
+
+// ============================================================
+// ---- IMPLEMENTASI LOGIKA ----
+// ============================================================
+
+// --- A. TURTLE SOUP (DETEKSI SWING) ---
+// OPTIMASI: ta.atr(14) ditarik ke sini (scope global, dihitung tiap bar tanpa syarat)
+// supaya konsisten dan tidak di-warning CW10003. Dipakai ulang di semua bagian bawah
+// (Soup label, MSS label, Dashboard) tanpa perlu panggil ta.atr() berkali-kali.
+atrValue = ta.atr(14)
+
+swingHigh = ta.highest(high, lookback * 2 + 1)
+swingLow = ta.lowest(low, lookback * 2 + 1)
+
+isSwingHigh = high == swingHigh and high > high[1] and high > high[2] and high > high[3] and high > high[4]
+isSwingLow = low == swingLow and low < low[1] and low < low[2] and low < low[3] and low < low[4]
+
+var float lastSwingHigh = na
+var float lastSwingLow = na
+var int lastSwingHighBar = 0
+var int lastSwingLowBar = 0
+
+if isSwingHigh
+    lastSwingHigh := high
+    lastSwingHighBar := bar_index
+
+if isSwingLow
+    lastSwingLow := low
+    lastSwingLowBar := bar_index
+
+// Kondisi Soup (Tidak Repaint)
+bullishSoup = low < lastSwingLow and close > lastSwingLow and close[1] <= lastSwingLow
+bearishSoup = high > lastSwingHigh and close < lastSwingHigh and close[1] >= lastSwingHigh
+
+// Plot Label Soup
+sizeMap = switch labelSize
+    "Tiny"   => size.tiny
+    "Small"  => size.small
+    "Normal" => size.normal
+    "Large"  => size.large
+    "Huge"   => size.huge
+
+if showSoup and showSoupLabel
+    if bullishSoup
+        label.new(bar_index, low - (atrValue * 0.6), "🐢 BULLISH", style=label.style_label_up, color=colorBullish, textcolor=color.white, size=sizeMap)
+    if bearishSoup
+        label.new(bar_index, high + (atrValue * 0.6), "🐢 BEARISH", style=label.style_label_down, color=colorBearish, textcolor=color.white, size=sizeMap)
+
+// Garis Swing (FIX: gunakan var line + set_xy agar tidak membuat garis baru tiap bar,
+// cukup update posisi garis yang sama -> menghemat kuota max_lines_count)
+var line swingHighLine = na
+var line swingLowLine = na
+
+if showSoup and showSwingLevels and not na(lastSwingHigh)
+    if na(swingHighLine)
+        swingHighLine := line.new(lastSwingHighBar, lastSwingHigh, bar_index, lastSwingHigh, color=colorSwingHigh, width=1, style=line.style_dashed)
+    else
+        line.set_xy1(swingHighLine, lastSwingHighBar, lastSwingHigh)
+        line.set_xy2(swingHighLine, bar_index, lastSwingHigh)
+
+if showSoup and showSwingLevels and not na(lastSwingLow)
+    if na(swingLowLine)
+        swingLowLine := line.new(lastSwingLowBar, lastSwingLow, bar_index, lastSwingLow, color=colorSwingLow, width=1, style=line.style_dashed)
+    else
+        line.set_xy1(swingLowLine, lastSwingLowBar, lastSwingLow)
+        line.set_xy2(swingLowLine, bar_index, lastSwingLow)
+
+// --- B. FVG (TIDAK REPAINT) ---
+// FIX: simpan semua box FVG dalam array dan hapus box lama sebelum menggambar ulang,
+// supaya tidak menumpuk setiap kali barstate.islast dievaluasi ulang (tiap tick harga baru).
+var box[] fvgBoxes = array.new_box()
+
+if barstate.islast and showFVG
+    if array.size(fvgBoxes) > 0
+        for i = 0 to array.size(fvgBoxes) - 1
+            box.delete(array.get(fvgBoxes, i))
+        array.clear(fvgBoxes)
+
+    for i = 0 to fvgLookback - 2
+        if low[i+2] > high[i]
+            top = low[i+2]
+            bottom = high[i]
+            unmitigated = true
+            if showUnmitigatedOnly
+                for j = 0 to i+1
+                    if low[j] <= top and high[j] >= bottom
+                        unmitigated := false
+                        break
+            if unmitigated
+                array.push(fvgBoxes, box.new(bar_index - i - 2, top, bar_index - i, bottom, bgcolor=fvgBullishColor, border_color=fvgBorderColor, border_width=1))
+        if high[i+2] < low[i]
+            top = low[i]
+            bottom = high[i+2]
+            unmitigated = true
+            if showUnmitigatedOnly
+                for j = 0 to i+1
+                    if low[j] <= top and high[j] >= bottom
+                        unmitigated := false
+                        break
+            if unmitigated
+                array.push(fvgBoxes, box.new(bar_index - i - 2, top, bar_index - i, bottom, bgcolor=fvgBearishColor, border_color=fvgBorderColor, border_width=1))
+
+// --- C. ORDER BLOCK (TIDAK REPAINT) ---
+// FIX: sama seperti FVG, box OB disimpan di array dan dihapus sebelum redraw
+// supaya tidak menumpuk tiap tick.
+var box[] obBoxes = array.new_box()
+
+if barstate.islast and showOB
+    if array.size(obBoxes) > 0
+        for i = 0 to array.size(obBoxes) - 1
+            box.delete(array.get(obBoxes, i))
+        array.clear(obBoxes)
+
+    for i = 1 to obLookback - 2
+        // Demand (Bullish)
+        if close[i] < open[i] and close[i-1] > high[i] and high[i-1] > high[i+1]
+            topOB = high[i]
+            bottomOB = low[i]
+            isMitigated = false
+            // FIX: saat i=1, i-2 = -1 -> loop lama mengakses high[-1] (offset negatif = data
+            // masa depan, tidak valid, menyebabkan error "history-referencing... between 0 and 5000").
+            // Saat i=1, candle breakout ADALAH candle saat ini, jadi belum ada candle sesudahnya
+            // untuk dicek mitigasinya -> loop dilewati (isMitigated tetap false), bukan dipaksa jalan dari -1.
+            if obUnmitigatedOnly and i >= 2
+                for j = i-2 to 0
+                    if high[j] >= bottomOB and low[j] <= topOB
+                        isMitigated := true
+                        break
+            if not isMitigated
+                array.push(obBoxes, box.new(bar_index - i, topOB, bar_index, bottomOB, bgcolor=obBullishColor, border_color=obBorderColor, border_width=1))
+        // Supply (Bearish)
+        if close[i] > open[i] and close[i-1] < low[i] and low[i-1] < low[i+1]
+            topOB = high[i]
+            bottomOB = low[i]
+            isMitigated = false
+            if obUnmitigatedOnly and i >= 2
+                for j = i-2 to 0
+                    if high[j] >= bottomOB and low[j] <= topOB
+                        isMitigated := true
+                        break
+            if not isMitigated
+                array.push(obBoxes, box.new(bar_index - i, topOB, bar_index, bottomOB, bgcolor=obBearishColor, border_color=obBorderColor, border_width=1))
+
+// --- D. MSS (MARKET STRUCTURE SHIFT) ---
+// FIX: bullishMSS/bearishMSS dipindah ke luar blok "if showMSS" karena variabel
+// yang dideklarasikan di dalam blok if bersifat lokal (tidak bisa diakses di
+// bagian Dashboard di bawah). Sebelumnya ini menyebabkan error "Undeclared identifier".
+prevHigh = ta.highest(high, mssLookback)[1]
+prevLow = ta.lowest(low, mssLookback)[1]
+bullishMSS = close > prevHigh
+bearishMSS = close < prevLow
+
+if showMSS and showMSSLabel
+    if bullishMSS
+        label.new(bar_index, low - (atrValue * 0.8), "⬆ MSS", style=label.style_label_up, color=mssBullColor, textcolor=color.white, size=size.tiny)
+    if bearishMSS
+        label.new(bar_index, high + (atrValue * 0.8), "⬇ MSS", style=label.style_label_down, color=mssBearColor, textcolor=color.white, size=size.tiny)
+
+// --- E. OTE (ZONA RETRACEMENT 62%-79%) ---
+if showOTE and not na(lastSwingHigh) and not na(lastSwingLow)
+    diff = lastSwingHigh - lastSwingLow
+    level62 = lastSwingHigh - diff * oteLevel62
+    level79 = lastSwingHigh - diff * oteLevel79
+    
+    // Gambar garis zona OTE
+    var line oteTop = na
+    var line oteBot = na
+    var linefill oteFill = na
+    
+    if barstate.islast
+        // Hapus line sebelumnya agar tidak numpuk (hanya tampilkan 1 zona terbaru)
+        line.delete(oteTop)
+        line.delete(oteBot)
+        linefill.delete(oteFill)
+        oteTop := line.new(bar_index-20, math.max(level62, level79), bar_index, math.max(level62, level79), color=oteColor, width=1, style=line.style_dashed)
+        oteBot := line.new(bar_index-20, math.min(level62, level79), bar_index, math.min(level62, level79), color=oteColor, width=1, style=line.style_dashed)
+        oteFill := linefill.new(oteTop, oteBot, color=color.new(oteColor, 20))
+
+// --- F. KILLZONE (SESI) ---
+// FIX: isSession dipindah ke luar blok "if showKillzone" karena dipakai lagi
+// di bagian Dashboard di bawah (sebelumnya "Undeclared identifier" error).
+// Dihitung selalu, tapi bgcolor hanya digambar kalau showKillzone aktif.
+tHour = hour(time)
+isSession = killzoneSession == "Asia (00-06 UTC)" ? (tHour >= 0 and tHour < 6) :
+             killzoneSession == "London (08-12 UTC)" ? (tHour >= 8 and tHour < 12) :
+             killzoneSession == "NY (13-16 UTC)" ? (tHour >= 13 and tHour < 16) :
+             ((tHour >= 0 and tHour < 6) or (tHour >= 8 and tHour < 12) or (tHour >= 13 and tHour < 16))
+
+bgcolor(showKillzone and isSession ? killzoneColor : na)
+
+// ============================================================
+// G. DASHBOARD (DENGAN POSISI & UKURAN FONT)
+// ============================================================
+// Mapping Posisi
+posMap = switch dashPosition
+    "Top Left"     => position.top_left
+    "Top Right"    => position.top_right
+    "Bottom Left"  => position.bottom_left
+    "Bottom Right" => position.bottom_right
+
+// Mapping Ukuran Font Dashboard
+dashSizeMap = switch dashFontSize
+    "Tiny"   => size.tiny
+    "Small"  => size.small
+    "Normal" => size.normal
+    "Large"  => size.large
+    "Huge"   => size.huge
+
+// Hitung Statistik (hanya berjalan di candle terakhir)
+var int totalSignals = 0
+var int bullishCount = 0
+var int bearishCount = 0
+
+if bullishSoup
+    totalSignals := totalSignals + 1
+    bullishCount := bullishCount + 1
+if bearishSoup
+    totalSignals := totalSignals + 1
+    bearishCount := bearishCount + 1
+
+if showDashboard and barstate.islast
+    var table dash = table.new(posMap, 4, 12, 
+                               bgcolor=color.new(color.black, 88),
+                               border_color=color.new(color.gray, 50),
+                               border_width=1)
+    
+    // Header (merge kolom 0-3 di baris 0)
+    table.cell(dash, 0, 0, "📊 ICT Ultimate", text_color=color.white, 
+               text_size=dashSizeMap, bgcolor=color.new(color.gray, 60))
+    table.merge_cells(dash, 0, 0, 3, 0)
+    
+    // Isi Data (merge kolom 1-3 di tiap baris untuk kolom value)
+    table.cell(dash, 0, 1, "Lookback", text_color=color.gray, text_size=dashSizeMap)
+    table.cell(dash, 1, 1, str.tostring(lookback), text_color=color.white, text_size=dashSizeMap)
+    table.merge_cells(dash, 1, 1, 3, 1)
+    
+    table.cell(dash, 0, 2, "Swing High", text_color=color.gray, text_size=dashSizeMap)
+    table.cell(dash, 1, 2, str.tostring(lastSwingHigh, "#.##"), text_color=color.orange, text_size=dashSizeMap)
+    table.merge_cells(dash, 1, 2, 3, 2)
+    
+    table.cell(dash, 0, 3, "Swing Low", text_color=color.gray, text_size=dashSizeMap)
+    table.cell(dash, 1, 3, str.tostring(lastSwingLow, "#.##"), text_color=color.blue, text_size=dashSizeMap)
+    table.merge_cells(dash, 1, 3, 3, 3)
+    
+    table.cell(dash, 0, 4, "Total Sinyal", text_color=color.gray, text_size=dashSizeMap)
+    table.cell(dash, 1, 4, str.tostring(totalSignals), text_color=color.white, text_size=dashSizeMap)
+    table.merge_cells(dash, 1, 4, 3, 4)
+    
+    table.cell(dash, 0, 5, "Bullish Soup", text_color=color.gray, text_size=dashSizeMap)
+    table.cell(dash, 1, 5, str.tostring(bullishCount), text_color=color.green, text_size=dashSizeMap)
+    table.merge_cells(dash, 1, 5, 3, 5)
+    
+    table.cell(dash, 0, 6, "Bearish Soup", text_color=color.gray, text_size=dashSizeMap)
+    table.cell(dash, 1, 6, str.tostring(bearishCount), text_color=color.red, text_size=dashSizeMap)
+    table.merge_cells(dash, 1, 6, 3, 6)
+    
+    table.cell(dash, 0, 7, "Status", text_color=color.gray, text_size=dashSizeMap)
+    statusText = bullishSoup ? "✅ BULLISH" : bearishSoup ? "🔴 BEARISH" : "⏳ Menunggu"
+    statusColor = bullishSoup ? color.green : bearishSoup ? color.red : color.gray
+    table.cell(dash, 1, 7, statusText, text_color=statusColor, text_size=dashSizeMap)
+    table.merge_cells(dash, 1, 7, 3, 7)
+    
+    table.cell(dash, 0, 8, "ATR (14)", text_color=color.gray, text_size=dashSizeMap)
+    table.cell(dash, 1, 8, str.tostring(atrValue, "#.####"), text_color=color.white, text_size=dashSizeMap)
+    table.merge_cells(dash, 1, 8, 3, 8)
+    
+    table.cell(dash, 0, 9, "MSS", text_color=color.gray, text_size=dashSizeMap)
+    mssText = bullishMSS ? "⬆ Bullish" : bearishMSS ? "⬇ Bearish" : "-"
+    mssColor = bullishMSS ? color.lime : bearishMSS ? color.fuchsia : color.gray
+    table.cell(dash, 1, 9, mssText, text_color=mssColor, text_size=dashSizeMap)
+    table.merge_cells(dash, 1, 9, 3, 9)
+    
+    table.cell(dash, 0, 10, "Sesi", text_color=color.gray, text_size=dashSizeMap)
+    table.cell(dash, 1, 10, isSession ? "🟢 Aktif" : "⚫ Nonaktif", text_color=isSession ? color.green : color.gray, text_size=dashSizeMap)
+    table.merge_cells(dash, 1, 10, 3, 10)
+    
+    table.cell(dash, 0, 11, "💡 Konfirmasi", text_color=color.new(#ff0c04, 10), 
+               text_size=dashSizeMap, bgcolor=color.new(#13911d, 15))
+    table.merge_cells(dash, 0, 11, 3, 11)
+
+
+// ============================================================
+// ALERT
+// ============================================================
+alertcondition(bullishSoup, title="Bullish Turtle Soup", message="🐢 Bullish TS! Cek FVG, OB & OTE.")
+alertcondition(bearishSoup, title="Bearish Turtle Soup", message="🐢 Bearish TS! Cek FVG, OB & OTE.")
+
+plot(na, title="", display=display.none)
